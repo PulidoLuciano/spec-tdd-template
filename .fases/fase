@@ -1,0 +1,294 @@
+#!/usr/bin/env bash
+# CLI de fases. Ver docs/METODOLOGIA.md.
+#
+#   .fases/fase estado                     Feature y fase activas, qué se puede tocar
+#   .fases/fase verificar                  Corre los chequeos del gate actual sin avanzar
+#   .fases/fase cobertura                  Casos documentados de la feature sin test
+#   .fases/fase iniciar F-NNN <nombre>     LIBRE → SPEC
+#   .fases/fase avanzar                    Pasa el gate actual (SPEC → TESTS → IMPL → LIBRE)
+#   .fases/fase retroceder SPEC|TESTS      Vuelve a una fase anterior por un error encontrado
+#
+# Las transiciones piden confirmación por terminal interactiva: solo las puede ejecutar el usuario.
+
+set -uo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+cargar_config
+leer_estado
+cd "$FASES_RAIZ" || exit 1
+
+DIR_DOCS="${RUTAS_DOCS%% *}"; DIR_DOCS="${DIR_DOCS%/}"
+FALLAS=0
+
+ok()    { echo "  ✓ $*"; }
+falla() { echo "  ✗ $*"; FALLAS=$((FALLAS + 1)); }
+aviso() { echo "  ! $*"; }
+morir() { echo "error: $*" >&2; exit 1; }
+
+# ── Lectura de la documentación ──────────────────────────────────────────────
+
+archivo_feature() {
+  compgen -G "$DIR_DOCS/features/$FEATURE-*.md" | head -1
+}
+
+casos_de_uso_de_feature() {
+  sed -n 's/^\*\*Casos de uso:\*\*//p' "$1" | grep -oE 'UC-[0-9]+' | sort -u
+}
+
+archivo_uc() {
+  { compgen -G "$DIR_DOCS/casos-de-uso/$1-*.md"; compgen -G "$DIR_DOCS/casos-de-uso/$1.md"; } | head -1
+}
+
+# IDs de un caso de uso: FP, más cada A<n> de los flujos alternativos y cada E<n> de la tabla de errores.
+ids_de_uc() {
+  echo FP
+  grep -oE '^[[:space:]]*-[[:space:]]*\*\*A[0-9]+\*\*' "$1" | grep -oE 'A[0-9]+' | sort -uV
+  grep -oE '^\|[[:space:]]*E[0-9]+[[:space:]]*\|' "$1" | grep -oE 'E[0-9]+' | sort -uV
+}
+
+# ── Chequeos ─────────────────────────────────────────────────────────────────
+
+# correr <nombre> <comando> <pasa|falla>
+correr() {
+  local nombre="$1" cmd="$2" esperado="$3" log resultado
+  if [[ -z "$cmd" ]]; then
+    if [[ "$nombre" == tests ]]; then falla "TEST_CMD no está definido en .fases/config"
+    else aviso "$nombre: sin comando en .fases/config, se omite"; fi
+    return
+  fi
+  log="$(mktemp)"
+  if bash -c "$cmd" >"$log" 2>&1; then resultado=pasa; else resultado=falla; fi
+  if [[ "$resultado" == "$esperado" ]]; then
+    ok "$nombre: $resultado"
+  else
+    falla "$nombre: $resultado (se esperaba que $esperado)"
+    tail -n 20 "$log" | sed 's/^/      /'
+  fi
+  rm -f "$log"
+}
+
+# sin_cambios_desde <tag> <descripción> <prefijos...>
+sin_cambios_desde() {
+  local tag="$1" desc="$2" cambios; shift 2
+  if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+    aviso "no existe el tag $tag, no se puede verificar $desc"
+    return
+  fi
+  # shellcheck disable=SC2068
+  cambios="$(git diff --name-only "$tag" HEAD -- $@)"
+  if [[ -z "$cambios" ]]; then ok "$desc sin cambios desde $tag"
+  else falla "$desc cambió desde $tag:"; sed 's/^/      /' <<<"$cambios"; fi
+}
+
+chequear_feature() {
+  local f uc ucs
+  f="$(archivo_feature)"
+  if [[ -z "$f" ]]; then falla "no existe $DIR_DOCS/features/$FEATURE-*.md"; return; fi
+  ok "feature: $f"
+  ucs="$(casos_de_uso_de_feature "$f")"
+  if [[ -z "$ucs" ]]; then falla "la feature no lista casos de uso (**Casos de uso:** UC-NNN)"; return; fi
+  for uc in $ucs; do
+    if [[ -n "$(archivo_uc "$uc")" ]]; then ok "$uc: $(archivo_uc "$uc")"
+    else falla "$uc: no existe $DIR_DOCS/casos-de-uso/$uc-*.md"; fi
+  done
+}
+
+chequear_abiertos() {
+  local abiertos
+  # shellcheck disable=SC2086
+  abiertos="$(grep -rln '\[ABIERTO\]' $RUTAS_DOCS --exclude-dir=plantillas --exclude=METODOLOGIA.md 2>/dev/null)"
+  if [[ -z "$abiertos" ]]; then ok "no quedan [ABIERTO] en la documentación"
+  else falla "quedan preguntas [ABIERTO] en:"; sed 's/^/      /' <<<"$abiertos"; fi
+}
+
+cobertura() {
+  local f uc ufile id token
+  f="$(archivo_feature)"
+  [[ -n "$f" ]] || { falla "no existe el archivo de la feature $FEATURE"; return; }
+  for uc in $(casos_de_uso_de_feature "$f"); do
+    ufile="$(archivo_uc "$uc")"
+    [[ -n "$ufile" ]] || { falla "$uc: no existe el archivo del caso de uso"; continue; }
+    for id in $(ids_de_uc "$ufile"); do
+      token="${uc//-/}_$id"
+      # shellcheck disable=SC2086
+      if grep -rqE "${token}([^0-9]|\$)" $RUTAS_TESTS 2>/dev/null; then ok "$token"
+      else falla "$token sin test"; fi
+    done
+  done
+}
+
+chequear_firmas() {
+  local guardadas=".fases/firmas/$FEATURE.txt"
+  if [[ -z "$FIRMAS_CMD" ]]; then aviso "sin FIRMAS_CMD: revisá a mano que las firmas públicas no cambiaron"; return; fi
+  if [[ ! -f "$guardadas" ]]; then falla "no existe $guardadas (se genera en el gate 1)"; return; fi
+  if diff -u "$guardadas" <(bash -c "$FIRMAS_CMD" 2>&1) >/dev/null; then ok "firmas públicas idénticas al gate 1"
+  else falla "las firmas públicas cambiaron:"; diff -u "$guardadas" <(bash -c "$FIRMAS_CMD" 2>&1) | sed 's/^/      /'; fi
+}
+
+gate_spec() {
+  echo "Gate 1 — SPEC → TESTS ($FEATURE)"
+  chequear_feature
+  chequear_abiertos
+  correr lint "$LINT_CMD" pasa
+  correr tipado "$TYPECHECK_CMD" pasa
+}
+
+gate_tests() {
+  echo "Gate 2 — TESTS → IMPL ($FEATURE)"
+  cobertura
+  sin_cambios_desde "$FEATURE/spec-aprobada" "docs/ y src/" $RUTAS_DOCS $RUTAS_SRC
+  correr tests "$TEST_CMD" falla
+}
+
+gate_impl() {
+  echo "Gate 3 — IMPL → LIBRE ($FEATURE)"
+  correr tests "$TEST_CMD" pasa
+  correr lint "$LINT_CMD" pasa
+  correr tipado "$TYPECHECK_CMD" pasa
+  sin_cambios_desde "$FEATURE/tests-aprobados" "docs/ y tests/" $RUTAS_DOCS $RUTAS_TESTS
+  chequear_firmas
+}
+
+correr_gate() {
+  case "$FASE" in
+    SPEC)  gate_spec ;;
+    TESTS) gate_tests ;;
+    IMPL)  gate_impl ;;
+    LIBRE) morir "no hay feature activa. Usá: .fases/fase iniciar F-NNN <nombre>" ;;
+    *)     morir "fase desconocida en .fases/estado: $FASE" ;;
+  esac
+}
+
+checklist_manual() {
+  echo
+  echo "Revisión manual:"
+  case "$FASE" in
+    SPEC)  echo "  - Cada UC tiene flujo principal, alternativos, errores y ejemplos concretos."
+           echo "  - Contratos de API completos y stubs creados en src/."
+           echo "  - Decisiones de arquitectura registradas en ADRs." ;;
+    TESTS) echo "  - Revisaste los tests y cubren lo que dice la spec."
+           echo "  - Los tests fallan por NotImplemented o por aserciones, no por imports o setup." ;;
+    IMPL)  echo "  - El código no tiene casos especiales para hacer pasar tests puntuales." ;;
+  esac
+}
+
+# ── Transiciones ─────────────────────────────────────────────────────────────
+
+confirmar() {
+  local respuesta
+  if ! { exec 3<>/dev/tty; } 2>/dev/null; then
+    morir "las transiciones de fase requieren una terminal interactiva: las ejecuta el usuario."
+  fi
+  printf '\n%s [s/N] ' "$1" >&3
+  read -r respuesta <&3
+  exec 3>&-
+  [[ "$respuesta" == s || "$respuesta" == S ]] || morir "cancelado."
+}
+
+requiere_arbol_limpio() {
+  git rev-parse -q --verify HEAD >/dev/null || morir "el repo no tiene commits todavía."
+  [[ -z "$(git status --porcelain)" ]] || morir "hay cambios sin commitear. Commiteá o descartá antes de cambiar de fase."
+}
+
+escribir_estado() {
+  printf 'FEATURE=%s\nFASE=%s\n' "$1" "$2" > .fases/estado
+}
+
+commitear_transicion() {
+  local mensaje="$1"; shift
+  git add .fases/estado "$@"
+  FASES_TRANSICION=1 git commit -q -m "$mensaje" || morir "no se pudo commitear la transición."
+}
+
+cmd_estado() {
+  echo "Feature: $FEATURE"
+  echo "Fase:    $FASE"
+  case "$FASE" in
+    LIBRE) echo "Editable: docs/, .fases/config, tooling. Congelado: src/, tests/" ;;
+    SPEC)  echo "Editable: docs/, stubs en src/. Congelado: tests/" ;;
+    TESTS) echo "Editable: tests/. Congelado: docs/, src/" ;;
+    IMPL)  echo "Editable: src/. Congelado: docs/, tests/" ;;
+  esac
+  if [[ "$FEATURE" != - ]] && git rev-parse -q --verify HEAD >/dev/null; then
+    echo "Tags:"; git tag -l "$FEATURE/*" | sed 's/^/  /'
+  fi
+}
+
+cmd_verificar() {
+  correr_gate
+  echo
+  if (( FALLAS == 0 )); then echo "Chequeos automáticos OK."; else echo "$FALLAS chequeo(s) fallaron."; exit 1; fi
+}
+
+cmd_cobertura() {
+  [[ "$FEATURE" != - ]] || morir "no hay feature activa."
+  echo "Cobertura de especificación ($FEATURE)"
+  cobertura
+  (( FALLAS == 0 )) || exit 1
+}
+
+cmd_iniciar() {
+  local id="${1:-}" nombre="${2:-}" archivo
+  [[ "$FASE" == LIBRE ]] || morir "ya hay una feature activa ($FEATURE en $FASE)."
+  [[ "$id" =~ ^F-[0-9]{3}$ && "$nombre" =~ ^[a-z0-9-]+$ ]] || morir "uso: .fases/fase iniciar F-NNN nombre-en-kebab-case"
+  FEATURE="$id"
+  [[ -z "$(archivo_feature)" ]] && ! git rev-parse -q --verify "refs/tags/$id/cerrada" >/dev/null \
+    || morir "la feature $id ya existe."
+  requiere_arbol_limpio
+  confirmar "¿Iniciar $id ($nombre) en fase SPEC?"
+  archivo="$DIR_DOCS/features/$id-$nombre.md"
+  sed "1s/.*/# $id — $nombre/" "$DIR_DOCS/plantillas/feature.md" > "$archivo"
+  escribir_estado "$id" SPEC
+  commitear_transicion "fase: $id iniciada (LIBRE → SPEC)" "$archivo"
+  echo "Feature $id en SPEC. Archivo: $archivo"
+}
+
+cmd_avanzar() {
+  local siguiente tag extra=()
+  case "$FASE" in
+    SPEC)  siguiente=TESTS; tag=spec-aprobada ;;
+    TESTS) siguiente=IMPL;  tag=tests-aprobados ;;
+    IMPL)  siguiente=LIBRE; tag=cerrada ;;
+    *)     correr_gate ;;
+  esac
+  requiere_arbol_limpio
+  correr_gate
+  (( FALLAS == 0 )) || morir "el gate no pasó ($FALLAS chequeo(s) fallaron)."
+  checklist_manual
+  confirmar "¿Aprobás el gate y pasás $FEATURE de $FASE a $siguiente?"
+  if [[ "$FASE" == SPEC && -n "$FIRMAS_CMD" ]]; then
+    bash -c "$FIRMAS_CMD" > ".fases/firmas/$FEATURE.txt" || morir "falló FIRMAS_CMD."
+    extra+=(".fases/firmas/$FEATURE.txt")
+  fi
+  git tag -f "$FEATURE/$tag" HEAD >/dev/null
+  if [[ "$siguiente" == LIBRE ]]; then escribir_estado - LIBRE; else escribir_estado "$FEATURE" "$siguiente"; fi
+  commitear_transicion "fase: $FEATURE $FASE → $siguiente" "${extra[@]}"
+  echo "Tag $FEATURE/$tag creado. $FEATURE: $FASE → $siguiente."
+}
+
+cmd_retroceder() {
+  local destino="${1:-}" motivo="${2:-}" n
+  case "$FASE:$destino" in
+    TESTS:SPEC|IMPL:SPEC|IMPL:TESTS) ;;
+    *) morir "no se puede retroceder de $FASE a '${destino}'. Válidos: TESTS→SPEC, IMPL→SPEC, IMPL→TESTS." ;;
+  esac
+  requiere_arbol_limpio
+  confirmar "¿Retroceder $FEATURE de $FASE a $destino?"
+  n=$(( $(git tag -l "$FEATURE/retroceso-*" | wc -l) + 1 ))
+  git tag "$FEATURE/retroceso-$n" HEAD
+  escribir_estado "$FEATURE" "$destino"
+  commitear_transicion "fase: $FEATURE $FASE → $destino (retroceso $n)${motivo:+
+
+$motivo}"
+  echo "Tag $FEATURE/retroceso-$n creado. $FEATURE: $FASE → $destino."
+  [[ "$destino" == SPEC ]] && echo "Registrá la incidencia en el archivo de la feature."
+}
+
+case "${1:-}" in
+  estado)     cmd_estado ;;
+  verificar)  cmd_verificar ;;
+  cobertura)  cmd_cobertura ;;
+  iniciar)    shift; cmd_iniciar "$@" ;;
+  avanzar)    cmd_avanzar ;;
+  retroceder) shift; cmd_retroceder "$@" ;;
+  *)          sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+esac

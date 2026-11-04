@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Hook pre-commit de git: rechaza commits que modifiquen rutas congeladas.
+# La fase que rige es la de HEAD, que es la fase en la que se hicieron los cambios.
+# Los commits de transición los hace la CLI (.fases/fase) con FASES_TRANSICION=1.
+
+source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+
+[[ "${FASES_TRANSICION:-}" == 1 ]] && exit 0
+git rev-parse -q --verify HEAD >/dev/null || exit 0
+
+cargar_config
+leer_estado "$(git show HEAD:.fases/estado 2>/dev/null)"
+[[ -n "$FASE" ]] || exit 0
+
+# Tag del último gate: restaurar un archivo congelado a esa versión siempre está permitido.
+case "$FASE" in
+  TESTS) tag_gate="$FEATURE/spec-aprobada" ;;
+  IMPL)  tag_gate="$FEATURE/tests-aprobados" ;;
+  *)     tag_gate="" ;;
+esac
+
+rechazados=""
+while IFS= read -r rel; do
+  [[ -n "$rel" ]] || continue
+  if [[ "$rel" == .fases/estado ]] || ! permitido "$FASE" "$(grupo_de_ruta "$rel")" git; then
+    [[ -n "$tag_gate" && "$rel" != .fases/estado ]] && git diff --cached --quiet "$tag_gate" -- "$rel" 2>/dev/null && continue
+    rechazados+="  $rel"$'\n'
+  fi
+done < <(git diff --cached --name-only --no-renames)
+
+if [[ -n "$rechazados" ]]; then
+  echo "Commit rechazado: estos archivos están congelados en la fase $FASE (feature $FEATURE):" >&2
+  printf '%s' "$rechazados" >&2
+  echo "Para cambiar de fase usá .fases/fase (ver docs/METODOLOGIA.md)." >&2
+  exit 1
+fi
+exit 0
