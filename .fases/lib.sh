@@ -19,10 +19,11 @@ leer_estado() {
 
 # Imprime el grupo de una ruta relativa a la raíz:
 # maquinaria | config | docs | src | tests | libre
+# "config" (.fases/config y .github/) solo se modifica en fase LIBRE.
 grupo_de_ruta() {
   local ruta="$1" p
   case "$ruta" in
-    .fases/config) echo config; return ;;
+    .fases/config|.github/*) echo config; return ;;
     .fases/*|.claude/*) echo maquinaria; return ;;
   esac
   for p in $RUTAS_DOCS;  do [[ "$ruta" == "$p"* ]] && { echo docs;  return; }; done
@@ -51,4 +52,10 @@ permitido() {
 archivos_modificados() {
   git -C "$FASES_RAIZ" diff --name-only --no-renames HEAD 2>/dev/null
   git -C "$FASES_RAIZ" ls-files --others --exclude-standard
+}
+
+RAMAS_PROTEGIDAS="main develop"
+
+rama_actual() {
+  git -C "$FASES_RAIZ" symbolic-ref --short -q HEAD
 }

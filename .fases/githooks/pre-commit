@@ -5,6 +5,14 @@
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
+rama="$(rama_actual)"
+for protegida in $RAMAS_PROTEGIDAS; do
+  if [[ "$rama" == "$protegida" ]] && git rev-parse -q --verify HEAD >/dev/null; then
+    echo "Commit rechazado: no se commitea directo en $rama. Creá una rama y abrí un PR (ver docs/METODOLOGIA.md §8)." >&2
+    exit 1
+  fi
+done
+
 [[ "${FASES_TRANSICION:-}" == 1 ]] && exit 0
 git rev-parse -q --verify HEAD >/dev/null || exit 0
 

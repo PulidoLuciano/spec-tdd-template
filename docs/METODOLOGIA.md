@@ -13,7 +13,7 @@
 
 ## 2. Ciclo de vida de una feature
 
-Hay **una sola feature activa a la vez**. Cada feature (`F-NNN`) pasa por estas fases, siempre en orden:
+Hay **una sola feature en curso a la vez** (la única excepción son los hotfixes, §8). Cada feature (`F-NNN`) se desarrolla en su propia rama y pasa por estas fases, siempre en orden:
 
 ```
             iniciar          gate 1           gate 2           gate 3
@@ -26,7 +26,7 @@ Hay **una sola feature activa a la vez**. Cada feature (`F-NNN`) pasa por estas 
 
 | Fase | Qué se puede modificar | Termina cuando |
 |---|---|---|
-| **LIBRE** | `docs/`, `.fases/config` y archivos de tooling (sin feature activa) | Se inicia una feature |
+| **LIBRE** | `docs/`, `.fases/config`, `.github/` y archivos de tooling (sin feature activa) | Se inicia una feature |
 | **SPEC** | `docs/` + stubs del contrato en `src/` (solo firmas, §4.3) | La spec está completa y el usuario la aprueba (gate 1) |
 | **TESTS** | `tests/` | Todo caso documentado tiene test, la suite falla por la razón correcta, y el usuario aprueba (gate 2) |
 | **IMPL** | `src/` | Pasa el 100% de los tests y lint/tipado no tiene errores (gate 3) |
@@ -56,13 +56,16 @@ Así la regla nunca se rompe: no se edita lo congelado, se *descongela* explíci
 ├── CLAUDE.md                     # Reglas operativas para Claude (resumen de este doc)
 ├── setup.sh                      # Se corre una vez al crear el proyecto
 ├── .claude/settings.json         # Hooks de Claude Code
+├── .github/workflows/            # CI (ci.yml) y deploys (deploy.yml)
+├── scripts/deploy.sh             # Deploy a un entorno; lo completa cada proyecto
 ├── .fases/
 │   ├── estado                    # Feature y fase activas (solo lo cambia la CLI)
 │   ├── config                    # Comandos y rutas propios del stack del proyecto
 │   ├── fase                      # CLI de transiciones y verificaciones
 │   ├── lib.sh                    # Lógica compartida por la CLI y los hooks
 │   ├── hooks/                    # Hooks de Claude Code
-│   └── githooks/pre-commit       # Hook de git
+│   ├── githooks/pre-commit       # Hook de git
+│   └── github-setup.sh           # Configura el repo en GitHub (ramas, protecciones)
 ├── docs/
 │   ├── METODOLOGIA.md            # Este documento
 │   ├── vision.md                 # Qué es el proyecto, para quién, objetivos, fuera de alcance
@@ -144,14 +147,74 @@ Cada gate se ejecuta con `.fases/fase avanzar`. La CLI corre los chequeos autom�
 2. **La CLI pide confirmación por terminal interactiva.** Claude no tiene terminal interactiva, así que no puede avanzar ni retroceder fases.
 3. **Hook de Claude Code (PreToolUse)**: bloquea `Edit`/`Write` sobre rutas congeladas según la fase, y siempre sobre la maquinaria (`.fases/`, `.claude/`).
 4. **Hook de Claude Code (PostToolUse sobre Bash)**: si un comando de shell modificó una ruta congelada, se lo informa a Claude de inmediato para que lo revierta.
-5. **Hook de git pre-commit**: rechaza commits que modifiquen rutas congeladas según la fase (protege también contra ediciones manuales). Restaurar un archivo congelado a su versión del último gate siempre está permitido.
+5. **Hook de git pre-commit**: rechaza commits que modifiquen rutas congeladas según la fase (protege también contra ediciones manuales), y cualquier commit directo en `main` o `develop`. Restaurar un archivo congelado a su versión del último gate siempre está permitido.
 6. **Tags de git por gate**: permiten verificar con `git diff <tag>` que lo congelado no cambió; el gate 3 lo hace automáticamente.
+7. **CI en GitHub Actions**: en cada PR verifica que la rama de origen sea válida para el destino, que la feature esté cerrada y que pasen tests, lint y tipado. Con la protección de ramas de GitHub, un PR que no pasa el CI no se puede mergear.
 
 Estos mecanismos evitan errores y descuidos, no un sabotaje deliberado (`git commit --no-verify` existe). La última garantía es el gate 3, que compara contra los tags.
 
-## 8. Primeros pasos en un proyecto nuevo
+## 8. Ramas, releases y entornos
 
-1. Crear el repo desde la plantilla y correr `./setup.sh`.
-2. En fase LIBRE: completar `docs/vision.md`, `docs/glosario.md` y escribir `ADR-0001` (stack).
+```
+main      ──●──────────────────────────────●────────────●──────▶  producción (tags v1.0.0, v1.0.1…)
+             \                            / \          /
+              \                 release/v1.0  hotfix/F-004
+               \                         /     \
+develop   ──────●───────●───────●───────●───────●──────────────▶  staging
+                 \     /  \     /
+            feature/F-001  feature/F-002
+```
+
+| Rama | Contiene | Sale de | Entra a | Deploy |
+|---|---|---|---|---|
+| `main` | Producción | — | — | Producción, al crear un tag `v*` |
+| `develop` | Features cerradas, todavía sin release | `main` | `main` (vía `release/*`) | Staging, en cada merge |
+| `feature/F-NNN-*` | Una feature en curso, en todas sus fases | `develop` | `develop` | Preview manual |
+| `release/vX.Y.Z` | Lo que va en el próximo release | `develop` | `main` | — |
+| `hotfix/F-NNN-*` | Un bug urgente de producción | `main` | `main`, y después `main` → `develop` | Preview manual |
+| `docs/*`, `chore/*` | Trabajo en fase LIBRE (visión, ADRs, tooling) | `develop` | `develop` | — |
+
+### Reglas
+
+1. **Nunca se commitea directo en `main` ni en `develop`.** Todo entra por pull request.
+2. **Los PR solo se abren con la feature cerrada** (gate 3 pasado, rama en `LIBRE`). `develop` y `main` siempre están en verde.
+3. **Siempre merge commit, nunca squash ni rebase.** Así se conservan el historial de fases y los tags de cada gate.
+4. **No se trae `develop` a una feature en curso.** Mientras la feature está en SPEC, TESTS o IMPL, su base no cambia. Si al abrir el PR hay conflictos, se resuelven con un retroceso formal.
+5. **Los tags se suben con la rama:** `git push --follow-tags`.
+
+### Features
+1. Desde `develop` actualizado: `.fases/fase iniciar F-NNN nombre` crea la rama `feature/F-NNN-nombre` y pasa a SPEC.
+2. Ciclo completo de fases en la rama. Para probar a mitad de camino: deploy de preview (abajo).
+3. Con la feature cerrada: `git push --follow-tags` y PR a `develop`. Al mergear, se despliega a staging.
+
+### Releases
+1. Elegir hasta qué commit de `develop` entra en el release (puede ser cualquiera, no necesariamente el último).
+2. `git switch -c release/vX.Y.Z <commit>` y `git push -u origin release/vX.Y.Z`.
+3. PR de `release/vX.Y.Z` a `main`. En la rama de release solo se permiten ajustes de fase LIBRE (por ejemplo, el changelog).
+4. Después del merge, crear el tag `vX.Y.Z` sobre `main` (o un *Release* desde la web de GitHub). Eso dispara el deploy a producción.
+5. Si hubo commits en la rama de release, PR de `main` a `develop` para no perderlos.
+
+Versionado semántico: `X` cambios incompatibles, `Y` features nuevas, `Z` hotfixes.
+
+### Hotfixes
+1. Desde `main` actualizado: `.fases/fase iniciar F-NNN nombre` crea la rama `hotfix/F-NNN-nombre`.
+2. Ciclo completo: un bug en producción es un caso que faltaba o estaba mal en la spec. Se documenta, se escribe un test que lo reproduce (y falla), y se corrige.
+3. PR a `main`, tag `vX.Y.Z+1` y deploy a producción.
+4. PR de `main` a `develop`.
+
+### Entornos
+| Entorno | Se despliega | Para qué |
+|---|---|---|
+| **production** | Al crear un tag `v*` en `main` | Usuarios reales |
+| **staging** | En cada push a `develop` | Probar features cerradas integradas, antes de un release |
+| **preview** | A mano, desde cualquier rama (Actions → Deploy → *Run workflow*) | Mirar una feature en curso sin mergearla |
+
+El deploy en sí depende del stack: lo implementa `scripts/deploy.sh <entorno>` y se decide en un ADR de infraestructura. Los secretos de cada entorno se cargan en los *Environments* de GitHub; en `production` conviene exigir aprobación manual.
+
+## 9. Primeros pasos en un proyecto nuevo
+
+1. Crear el repo desde la plantilla, correr `./setup.sh` (crea `develop`) y `.fases/github-setup.sh` (protecciones en GitHub).
+2. En una rama `docs/inicio` desde `develop`, en fase LIBRE: completar `docs/vision.md`, `docs/glosario.md` y escribir `ADR-0001` (stack).
 3. Completar `.fases/config` con los comandos de tests, lint y tipado del stack, instalar el tooling y ajustar `.gitignore` (las transiciones exigen el árbol limpio).
-4. `.fases/fase iniciar F-001 <nombre>` y arrancar con la spec.
+4. Completar los pasos marcados en `.github/workflows/ci.yml` para instalar el stack en el CI.
+5. PR a `develop`. Después, desde `develop`: `.fases/fase iniciar F-001 <nombre>`.
