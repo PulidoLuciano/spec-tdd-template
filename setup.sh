@@ -12,7 +12,7 @@ fi
 
 [[ -d .git ]] || git init -q -b main
 git config core.hooksPath .fases/githooks
-chmod +x .fases/fase .fases/lib.sh .fases/hooks/*.sh .fases/githooks/* .fases/github-setup.sh scripts/*.sh
+chmod +x .fases/fase .fases/lib.sh .fases/hooks/*.sh .fases/githooks/* .fases/github-setup.sh
 
 # develop sale de main
 if git rev-parse -q --verify HEAD >/dev/null && ! git rev-parse -q --verify refs/heads/develop >/dev/null; then
@@ -30,9 +30,9 @@ echo
 .fases/fase estado
 echo
 
-echo "Próximos pasos (ver docs/METODOLOGIA.md §9):"
+echo "Próximos pasos (ver docs/METODOLOGIA.md §10):"
 echo "  1. .fases/github-setup.sh   (sube develop y configura las protecciones en GitHub)"
 echo "  2. git switch -c docs/inicio"
 echo "  3. Completar docs/vision.md, docs/glosario.md y docs/arquitectura/adr/0001-stack.md"
-echo "  4. Completar .fases/config y los pasos del stack en .github/workflows/"
+echo "  4. Crear los componentes: .fases/fase componente agregar <nombre> <ruta>"
 echo "  5. PR a develop. Después: .fases/fase iniciar F-001 <nombre>"

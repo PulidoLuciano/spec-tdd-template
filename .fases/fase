@@ -1,16 +1,27 @@
 #!/usr/bin/env bash
 # CLI de fases. Ver docs/METODOLOGIA.md.
 #
-#   .fases/fase estado                     Feature y fase activas, qué se puede tocar
-#   .fases/fase verificar                  Corre los chequeos del gate actual sin avanzar
-#   .fases/fase cobertura                  Casos documentados de la feature sin test
-#   .fases/fase iniciar F-NNN <nombre>     LIBRE → SPEC: crea feature/F-NNN-<nombre> desde develop
-#                                          (o hotfix/F-NNN-<nombre> desde main)
-#   .fases/fase avanzar                    Pasa el gate actual (SPEC → TESTS → IMPL → LIBRE)
-#   .fases/fase retroceder SPEC|TESTS      Vuelve a una fase anterior por un error encontrado
-#   .fases/fase ci [base] [origen]         Chequeos de un PR (lo corre GitHub Actions)
+# Ciclo de una feature (las transiciones las ejecuta el usuario: piden confirmación por terminal)
+#   .fases/fase estado                         Rama, feature, fase y qué se puede tocar
+#   .fases/fase verificar                      Corre los chequeos del gate actual sin avanzar
+#   .fases/fase cobertura                      Casos documentados de la feature sin test
+#   .fases/fase iniciar F-NNN <nombre>         LIBRE → SPEC: crea feature/F-NNN-<nombre> desde develop
+#                                              (o hotfix/F-NNN-<nombre> desde main)
+#   .fases/fase avanzar                        Pasa el gate actual (SPEC → TESTS → IMPL → LIBRE)
+#   .fases/fase retroceder SPEC|TESTS [motivo] Vuelve a una fase anterior por un error encontrado
 #
-# Las transiciones piden confirmación por terminal interactiva: solo las puede ejecutar el usuario.
+# Componentes
+#   .fases/fase componentes                    Lista los componentes y sus rutas
+#   .fases/fase componente agregar <nombre> <ruta> [--solo-tests]
+#                                              Crea un componente (en fase LIBRE)
+#
+# Versiones (en main, una por componente)
+#   .fases/fase pendientes                     Cambios de cada componente desde su última versión
+#   .fases/fase publicar <componente> vX.Y.Z   Crea y sube el tag <componente>/vX.Y.Z (dispara el deploy)
+#
+# CI (lo corre GitHub Actions)
+#   .fases/fase ci [base] [origen]             Reglas de un PR: ramas, feature cerrada, tags
+#   .fases/fase ci-componente <nombre>         Tests, lint y tipado de un componente
 
 set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -18,7 +29,6 @@ cargar_config
 leer_estado
 cd "$FASES_RAIZ" || exit 1
 
-DIR_DOCS="${RUTAS_DOCS%% *}"; DIR_DOCS="${DIR_DOCS%/}"
 FALLAS=0
 
 ok()    { echo "  ✓ $*"; }
@@ -26,43 +36,22 @@ falla() { echo "  ✗ $*"; FALLAS=$((FALLAS + 1)); }
 aviso() { echo "  ! $*"; }
 morir() { echo "error: $*" >&2; exit 1; }
 
-# ── Lectura de la documentación ──────────────────────────────────────────────
-
-archivo_feature() {
-  compgen -G "$DIR_DOCS/features/$FEATURE-*.md" | head -1
-}
-
-casos_de_uso_de_feature() {
-  sed -n 's/^\*\*Casos de uso:\*\*//p' "$1" | grep -oE 'UC-[0-9]+' | sort -u
-}
-
-archivo_uc() {
-  { compgen -G "$DIR_DOCS/casos-de-uso/$1-*.md"; compgen -G "$DIR_DOCS/casos-de-uso/$1.md"; } | head -1
-}
-
-# IDs de un caso de uso: FP, más cada A<n> de los flujos alternativos y cada E<n> de la tabla de errores.
-ids_de_uc() {
-  echo FP
-  grep -oE '^[[:space:]]*-[[:space:]]*\*\*A[0-9]+\*\*' "$1" | grep -oE 'A[0-9]+' | sort -uV
-  grep -oE '^\|[[:space:]]*E[0-9]+[[:space:]]*\|' "$1" | grep -oE 'E[0-9]+' | sort -uV
-}
-
 # ── Chequeos ─────────────────────────────────────────────────────────────────
 
-# correr <nombre> <comando> <pasa|falla>
+# correr <componente> <qué> <comando> <pasa|falla>: corre el comando dentro de la raíz del componente.
 correr() {
-  local nombre="$1" cmd="$2" esperado="$3" log resultado
+  local comp="$1" que="$2" cmd="$3" esperado="$4" log resultado
   if [[ -z "$cmd" ]]; then
-    if [[ "$nombre" == tests ]]; then falla "TEST_CMD no está definido en .fases/config"
-    else aviso "$nombre: sin comando en .fases/config, se omite"; fi
+    if [[ "$que" == tests ]]; then falla "$comp: TEST_CMD no está definido en .fases/componentes/$comp.conf"
+    else aviso "$comp: $que sin comando, se omite"; fi
     return
   fi
   log="$(mktemp)"
-  if bash -c "$cmd" >"$log" 2>&1; then resultado=pasa; else resultado=falla; fi
+  if (cd "${C_RUTA[$comp]}" && bash -c "$cmd") >"$log" 2>&1; then resultado=pasa; else resultado=falla; fi
   if [[ "$resultado" == "$esperado" ]]; then
-    ok "$nombre: $resultado"
+    ok "$comp: $que $resultado"
   else
-    falla "$nombre: $resultado (se esperaba que $esperado)"
+    falla "$comp: $que $resultado (se esperaba que $esperado)"
     tail -n 20 "$log" | sed 's/^/      /'
   fi
   rm -f "$log"
@@ -75,22 +64,31 @@ sin_cambios_desde() {
     aviso "no existe el tag $tag, no se puede verificar $desc"
     return
   fi
-  # shellcheck disable=SC2068
-  cambios="$(git diff --name-only "$tag" HEAD -- $@)"
+  cambios="$(git diff --name-only "$tag" HEAD -- "$@" | grep -v '/\.gitkeep$')"
   if [[ -z "$cambios" ]]; then ok "$desc sin cambios desde $tag"
   else falla "$desc cambió desde $tag:"; sed 's/^/      /' <<<"$cambios"; fi
 }
 
+# Deja en DECLARADOS los componentes de la feature activa.
+leer_declarados() {
+  mapfile -t DECLARADOS < <(componentes_declarados)
+}
+
 chequear_feature() {
-  local f uc ucs
+  local f uc c ucs
   f="$(archivo_feature)"
   if [[ -z "$f" ]]; then falla "no existe $DIR_DOCS/features/$FEATURE-*.md"; return; fi
   ok "feature: $f"
   ucs="$(casos_de_uso_de_feature "$f")"
-  if [[ -z "$ucs" ]]; then falla "la feature no lista casos de uso (**Casos de uso:** UC-NNN)"; return; fi
+  if [[ -z "$ucs" ]]; then falla "la feature no lista casos de uso (**Casos de uso:** UC-NNN)"; fi
   for uc in $ucs; do
     if [[ -n "$(archivo_uc "$uc")" ]]; then ok "$uc: $(archivo_uc "$uc")"
     else falla "$uc: no existe $DIR_DOCS/casos-de-uso/$uc-*.md"; fi
+  done
+  if (( ${#DECLARADOS[@]} == 0 )); then falla "la feature no declara componentes (**Componentes:** nombre, …)"; fi
+  for c in "${DECLARADOS[@]}"; do
+    if existe_componente "$c"; then ok "componente $c"
+    else falla "componente '$c' no existe (ver .fases/fase componentes)"; fi
   done
 }
 
@@ -103,54 +101,80 @@ chequear_abiertos() {
 }
 
 cobertura() {
-  local f uc ufile id token
+  local f uc ufile id token prefijos
   f="$(archivo_feature)"
   [[ -n "$f" ]] || { falla "no existe el archivo de la feature $FEATURE"; return; }
+  prefijos="$(todos_los_prefijos tests)"
+  [[ -n "$prefijos" ]] || { falla "no hay componentes con tests"; return; }
   for uc in $(casos_de_uso_de_feature "$f"); do
     ufile="$(archivo_uc "$uc")"
     [[ -n "$ufile" ]] || { falla "$uc: no existe el archivo del caso de uso"; continue; }
     for id in $(ids_de_uc "$ufile"); do
       token="${uc//-/}_$id"
       # shellcheck disable=SC2086
-      if grep -rqE "${token}([^0-9]|\$)" $RUTAS_TESTS 2>/dev/null; then ok "$token"
+      if grep -rqE "${token}([^0-9]|\$)" $prefijos 2>/dev/null; then ok "$token"
       else falla "$token sin test"; fi
     done
   done
 }
 
+archivo_firmas() { echo ".fases/firmas/$FEATURE/$1.txt"; }
+
 chequear_firmas() {
-  local guardadas=".fases/firmas/$FEATURE.txt"
-  if [[ -z "$FIRMAS_CMD" ]]; then aviso "sin FIRMAS_CMD: revisá a mano que las firmas públicas no cambiaron"; return; fi
-  if [[ ! -f "$guardadas" ]]; then falla "no existe $guardadas (se genera en el gate 1)"; return; fi
-  if diff -u "$guardadas" <(bash -c "$FIRMAS_CMD" 2>&1) >/dev/null; then ok "firmas públicas idénticas al gate 1"
-  else falla "las firmas públicas cambiaron:"; diff -u "$guardadas" <(bash -c "$FIRMAS_CMD" 2>&1) | sed 's/^/      /'; fi
+  local c guardadas
+  for c in "${DECLARADOS[@]}"; do
+    existe_componente "$c" || continue
+    guardadas="$(archivo_firmas "$c")"
+    if [[ -z "${C_FIRMAS[$c]}" ]]; then aviso "$c: sin FIRMAS_CMD, revisá a mano que las firmas públicas no cambiaron"; continue; fi
+    if [[ ! -f "$guardadas" ]]; then falla "$c: no existe $guardadas (se genera en el gate 1)"; continue; fi
+    if diff -u "$guardadas" <(cd "${C_RUTA[$c]}" && bash -c "${C_FIRMAS[$c]}" 2>&1) >/dev/null; then
+      ok "$c: firmas públicas idénticas al gate 1"
+    else
+      falla "$c: las firmas públicas cambiaron:"
+      diff -u "$guardadas" <(cd "${C_RUTA[$c]}" && bash -c "${C_FIRMAS[$c]}" 2>&1) | sed 's/^/      /'
+    fi
+  done
 }
 
 gate_spec() {
+  local c
   echo "Gate 1 — SPEC → TESTS ($FEATURE)"
   chequear_feature
   chequear_abiertos
-  correr lint "$LINT_CMD" pasa
-  correr tipado "$TYPECHECK_CMD" pasa
+  for c in "${DECLARADOS[@]}"; do
+    existe_componente "$c" || continue
+    correr "$c" lint "${C_LINT[$c]}" pasa
+    correr "$c" tipado "${C_TIPADO[$c]}" pasa
+  done
 }
 
 gate_tests() {
+  local c
   echo "Gate 2 — TESTS → IMPL ($FEATURE)"
   cobertura
-  sin_cambios_desde "$FEATURE/spec-aprobada" "docs/ y src/" $RUTAS_DOCS $RUTAS_SRC
-  correr tests "$TEST_CMD" falla
+  # shellcheck disable=SC2046
+  sin_cambios_desde "$FEATURE/spec-aprobada" "docs y src" $RUTAS_DOCS $(todos_los_prefijos src)
+  for c in "${DECLARADOS[@]}"; do
+    existe_componente "$c" || continue
+    correr "$c" tests "${C_TEST[$c]}" falla
+  done
 }
 
 gate_impl() {
+  local c
   echo "Gate 3 — IMPL → LIBRE ($FEATURE)"
-  correr tests "$TEST_CMD" pasa
-  correr lint "$LINT_CMD" pasa
-  correr tipado "$TYPECHECK_CMD" pasa
-  sin_cambios_desde "$FEATURE/tests-aprobados" "docs/ y tests/" $RUTAS_DOCS $RUTAS_TESTS
+  for c in "${COMPONENTES[@]}"; do
+    correr "$c" tests "${C_TEST[$c]}" pasa
+    correr "$c" lint "${C_LINT[$c]}" pasa
+    correr "$c" tipado "${C_TIPADO[$c]}" pasa
+  done
+  # shellcheck disable=SC2046
+  sin_cambios_desde "$FEATURE/tests-aprobados" "docs y tests" $RUTAS_DOCS $(todos_los_prefijos tests)
   chequear_firmas
 }
 
 correr_gate() {
+  leer_declarados
   case "$FASE" in
     SPEC)  gate_spec ;;
     TESTS) gate_tests ;;
@@ -165,7 +189,7 @@ checklist_manual() {
   echo "Revisión manual:"
   case "$FASE" in
     SPEC)  echo "  - Cada UC tiene flujo principal, alternativos, errores y ejemplos concretos."
-           echo "  - Contratos de API completos y stubs creados en src/."
+           echo "  - Contratos entre componentes completos (docs/api/) y stubs creados en cada src/."
            echo "  - Decisiones de arquitectura registradas en ADRs." ;;
     TESTS) echo "  - Revisaste los tests y cubren lo que dice la spec."
            echo "  - Los tests fallan por NotImplemented o por aserciones, no por imports o setup." ;;
@@ -178,7 +202,7 @@ checklist_manual() {
 confirmar() {
   local respuesta
   if ! { exec 3<>/dev/tty; } 2>/dev/null; then
-    morir "las transiciones de fase requieren una terminal interactiva: las ejecuta el usuario."
+    morir "esta operación requiere una terminal interactiva: la ejecuta el usuario."
   fi
   printf '\n%s [s/N] ' "$1" >&3
   read -r respuesta <&3
@@ -188,7 +212,15 @@ confirmar() {
 
 requiere_arbol_limpio() {
   git rev-parse -q --verify HEAD >/dev/null || morir "el repo no tiene commits todavía."
-  [[ -z "$(git status --porcelain)" ]] || morir "hay cambios sin commitear. Commiteá o descartá antes de cambiar de fase."
+  [[ -z "$(git status --porcelain)" ]] || morir "hay cambios sin commitear. Commiteá o descartá antes de seguir."
+}
+
+# requiere_al_dia <rama>: si hay remote, trae todo y exige que la rama local coincida con origin.
+requiere_al_dia() {
+  git remote get-url origin >/dev/null 2>&1 || return 0
+  git fetch -q --prune --tags origin || morir "no se pudo actualizar desde origin."
+  [[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$1" 2>/dev/null)" ]] \
+    || morir "$1 no está al día con origin/$1 (git pull)."
 }
 
 escribir_estado() {
@@ -202,14 +234,19 @@ commitear_transicion() {
 }
 
 cmd_estado() {
-  echo "Rama:    $(rama_actual)"
-  echo "Feature: $FEATURE"
-  echo "Fase:    $FASE"
+  local declarados
+  echo "Rama:        $(rama_actual)"
+  echo "Feature:     $FEATURE"
+  echo "Fase:        $FASE"
+  if [[ "$FEATURE" != - ]]; then
+    declarados="$(componentes_declarados | paste -sd, - | sed 's/,/, /g')"
+    echo "Componentes: ${declarados:-(ninguno declarado en el archivo de la feature)}"
+  fi
   case "$FASE" in
-    LIBRE) echo "Editable: docs/, .fases/config, tooling. Congelado: src/, tests/" ;;
-    SPEC)  echo "Editable: docs/, stubs en src/. Congelado: tests/" ;;
-    TESTS) echo "Editable: tests/. Congelado: docs/, src/" ;;
-    IMPL)  echo "Editable: src/. Congelado: docs/, tests/" ;;
+    LIBRE) echo "Editable:    docs/, configuración (.fases/config, .fases/componentes/, .github/). Congelado: src y tests" ;;
+    SPEC)  echo "Editable:    docs/, stubs en src de los componentes declarados. Congelado: tests" ;;
+    TESTS) echo "Editable:    tests de los componentes declarados. Congelado: docs/, src" ;;
+    IMPL)  echo "Editable:    src de los componentes declarados. Congelado: docs/, tests" ;;
   esac
   if [[ "$FEATURE" != - ]] && git rev-parse -q --verify HEAD >/dev/null; then
     echo "Tags:"; git tag -l "$FEATURE/*" | sed 's/^/  /'
@@ -233,6 +270,7 @@ cmd_iniciar() {
   local id="${1:-}" nombre="${2:-}" archivo base tipo rama
   [[ "$FASE" == LIBRE ]] || morir "ya hay una feature activa ($FEATURE en $FASE)."
   [[ "$id" =~ ^F-[0-9]{3}$ && "$nombre" =~ ^[a-z0-9-]+$ ]] || morir "uso: .fases/fase iniciar F-NNN nombre-en-kebab-case"
+  (( ${#COMPONENTES[@]} > 0 )) || morir "no hay componentes. Creá al menos uno: .fases/fase componente agregar <nombre> <ruta>"
   requiere_arbol_limpio
   base="$(rama_actual)"
   case "$base" in
@@ -240,11 +278,7 @@ cmd_iniciar() {
     main)    tipo=hotfix ;;
     *)       morir "iniciá las features desde develop (o los hotfixes desde main). Rama actual: ${base:-HEAD suelto}." ;;
   esac
-  if git remote get-url origin >/dev/null 2>&1; then
-    git fetch -q --prune --tags origin || morir "no se pudo actualizar desde origin."
-    [[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$base")" ]] \
-      || morir "$base no está al día con origin/$base (git pull)."
-  fi
+  requiere_al_dia "$base"
   FEATURE="$id"
   if [[ -n "$(archivo_feature)" || -n "$(git tag -l "$id/*")" || -n "$(git branch -a --list "*/$id-*")" ]]; then
     morir "el ID $id ya está en uso (archivo, tag o rama)."
@@ -257,10 +291,11 @@ cmd_iniciar() {
   escribir_estado "$id" SPEC
   commitear_transicion "fase: $id iniciada (LIBRE → SPEC)" "$archivo"
   echo "Rama $rama creada. $id en SPEC. Archivo: $archivo"
+  echo "Completá **Casos de uso:** y **Componentes:** en el archivo de la feature."
 }
 
 cmd_avanzar() {
-  local siguiente tag extra=()
+  local siguiente tag c extra=()
   case "$FASE" in
     SPEC)  siguiente=TESTS; tag=spec-aprobada ;;
     TESTS) siguiente=IMPL;  tag=tests-aprobados ;;
@@ -272,9 +307,13 @@ cmd_avanzar() {
   (( FALLAS == 0 )) || morir "el gate no pasó ($FALLAS chequeo(s) fallaron)."
   checklist_manual
   confirmar "¿Aprobás el gate y pasás $FEATURE de $FASE a $siguiente?"
-  if [[ "$FASE" == SPEC && -n "$FIRMAS_CMD" ]]; then
-    bash -c "$FIRMAS_CMD" > ".fases/firmas/$FEATURE.txt" || morir "falló FIRMAS_CMD."
-    extra+=(".fases/firmas/$FEATURE.txt")
+  if [[ "$FASE" == SPEC ]]; then
+    for c in "${DECLARADOS[@]}"; do
+      [[ -n "${C_FIRMAS[$c]}" ]] || continue
+      mkdir -p ".fases/firmas/$FEATURE"
+      (cd "${C_RUTA[$c]}" && bash -c "${C_FIRMAS[$c]}") > "$(archivo_firmas "$c")" || morir "falló FIRMAS_CMD de $c."
+      extra+=("$(archivo_firmas "$c")")
+    done
   fi
   git tag -a -f -m "$FEATURE: $tag" "$FEATURE/$tag" HEAD >/dev/null
   if [[ "$siguiente" == LIBRE ]]; then escribir_estado - LIBRE; else escribir_estado "$FEATURE" "$siguiente"; fi
@@ -300,40 +339,147 @@ $motivo}"
   [[ "$destino" == SPEC ]] && echo "Registrá la incidencia en el archivo de la feature."
 }
 
+# ── Componentes ──────────────────────────────────────────────────────────────
+
+cmd_componentes() {
+  local c
+  (( ${#COMPONENTES[@]} > 0 )) || { echo "No hay componentes. Creá uno: .fases/fase componente agregar <nombre> <ruta>"; return; }
+  for c in "${COMPONENTES[@]}"; do
+    printf '%-12s raíz: %-22s src: %-28s tests: %s\n' "$c" "${C_RUTA[$c]}" "${C_SRC[$c]:--}" "${C_TESTS[$c]:--}"
+  done
+}
+
+# Regenera la línea "needs:" del job final de ci.yml con todos los componentes.
+actualizar_needs_ci() {
+  local ci=.github/workflows/ci.yml c needs="reglas"
+  for c in "${COMPONENTES[@]}"; do needs+=", comp-$c"; done
+  sed -i "s/^    needs: \[.*\] # componentes$/    needs: [$needs] # componentes/" "$ci"
+}
+
+cmd_componente() {
+  local accion="${1:-}" nombre="${2:-}" ruta="${3:-}" opcion="${4:-}" conf glob job
+  [[ "$accion" == agregar ]] || morir "uso: .fases/fase componente agregar <nombre> <ruta> [--solo-tests]"
+  [[ "$FASE" == LIBRE ]] || morir "los componentes se agregan en fase LIBRE (fase actual: $FASE)."
+  [[ "$nombre" =~ ^[a-z][a-z0-9-]*$ ]] || morir "el nombre debe ser kebab-case (ej: backend, web, mobile, e2e)."
+  [[ "$nombre" != reglas && "$nombre" != fases ]] || morir "'$nombre' es un nombre reservado."
+  existe_componente "$nombre" && morir "el componente $nombre ya existe."
+  [[ -n "$ruta" && "$ruta" != /* && "$ruta" != *..* ]] || morir "la ruta debe ser relativa a la raíz del repo (\".\" para la raíz)."
+  ruta="${ruta%/}"; ruta="${ruta#./}"; [[ -n "$ruta" ]] || ruta=.
+  [[ -z "$opcion" || "$opcion" == --solo-tests ]] || morir "opción desconocida: $opcion"
+
+  conf=".fases/componentes/$nombre.conf"
+  if [[ "$opcion" == --solo-tests ]]; then
+    sed -e "s|__RUTA__|$ruta|" -e 's|__SRC__||' -e 's|__TESTS__|.|' .fases/plantillas/componente.conf > "$conf"
+    mkdir -p "$ruta" && touch "$ruta/.gitkeep"
+  else
+    sed -e "s|__RUTA__|$ruta|" -e 's|__SRC__|src/|' -e 's|__TESTS__|tests/|' .fases/plantillas/componente.conf > "$conf"
+    mkdir -p "$ruta/src" "$ruta/tests" && touch "$ruta/src/.gitkeep" "$ruta/tests/.gitkeep"
+  fi
+
+  job="$(sed "s/__NOMBRE__/$nombre/g" .fases/plantillas/ci-job.yml)"
+  awk -v job="$job" '/^  # <<< componentes$/ { print job; print "" } { print }' .github/workflows/ci.yml > .github/workflows/ci.yml.tmp \
+    && mv .github/workflows/ci.yml.tmp .github/workflows/ci.yml
+  COMPONENTES+=("$nombre")
+  actualizar_needs_ci
+
+  echo "Componente $nombre creado en $ruta."
+  echo "  - $conf: completar TEST_CMD, LINT_CMD, TYPECHECK_CMD y FIRMAS_CMD"
+  echo "  - .github/workflows/ci.yml: completar la preparación del stack en el job comp-$nombre"
+  if [[ "$opcion" != --solo-tests ]]; then
+    if [[ "$ruta" == . ]]; then glob='**'; else glob="$ruta/**"; fi
+    sed -e "s/__NOMBRE__/$nombre/g" -e "s|__GLOB__|$glob|g" .fases/plantillas/deploy.yml > ".github/workflows/deploy-$nombre.yml"
+    echo "  - .github/workflows/deploy-$nombre.yml: completar la preparación del stack y el deploy"
+  fi
+}
+
+# ── Versiones ────────────────────────────────────────────────────────────────
+
+ultima_version() {
+  git tag -l "$1/v*" --sort=-v:refname | head -1
+}
+
+cmd_pendientes() {
+  local c ultima n
+  for c in "${COMPONENTES[@]}"; do
+    [[ -n "${C_SRC[$c]}" ]] || continue   # los componentes de solo tests no se publican
+    ultima="$(ultima_version "$c")"
+    n="$(git rev-list --count --no-merges "${ultima:+$ultima..}HEAD" -- "${C_RUTA[$c]}")"
+    printf '%-12s %-22s %s commit(s) sin publicar\n' "$c" "${ultima:-(sin versiones)}" "$n"
+  done
+}
+
+cmd_publicar() {
+  local comp="${1:-}" version="${2:-}" ultima tag
+  existe_componente "$comp" || morir "uso: .fases/fase publicar <componente> vX.Y.Z (componentes: ${COMPONENTES[*]})"
+  [[ -n "${C_SRC[$comp]}" ]] || morir "$comp es un componente de solo tests: no se publica."
+  [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || morir "la versión debe tener la forma vX.Y.Z"
+  [[ "$(rama_actual)" == main ]] || morir "las versiones se publican desde main."
+  requiere_arbol_limpio
+  requiere_al_dia main
+  tag="$comp/$version"
+  ultima="$(ultima_version "$comp")"
+  git rev-parse -q --verify "refs/tags/$tag" >/dev/null && morir "el tag $tag ya existe."
+  if [[ -n "$ultima" && "$(printf '%s\n%s\n' "${ultima#*/}" "$version" | sort -V | tail -1)" != "$version" ]]; then
+    morir "$version no es mayor que la última versión de $comp (${ultima#*/})."
+  fi
+  if [[ -n "$ultima" && "$(git rev-list --count "$ultima..HEAD" -- "${C_RUTA[$comp]}")" == 0 ]]; then
+    aviso "$comp no tiene cambios desde $ultima."
+  fi
+  confirmar "¿Publicar $tag desde main${ultima:+ (anterior: $ultima)}? Esto dispara el deploy a producción."
+  git tag -a -m "$comp $version" "$tag" HEAD || morir "no se pudo crear el tag."
+  if git remote get-url origin >/dev/null 2>&1; then
+    git push -q origin "$tag" || morir "no se pudo subir el tag $tag."
+    echo "Tag $tag creado y subido."
+  else
+    echo "Tag $tag creado (no hay remote origin)."
+  fi
+}
+
 # ── CI ───────────────────────────────────────────────────────────────────────
 
 cmd_ci() {
   local base="${1:-${GITHUB_BASE_REF:-}}" origen="${2:-${GITHUB_HEAD_REF:-}}" id
-  if [[ -n "$base" ]]; then
-    echo "PR: $origen → $base"
-    case "$base:$origen" in
-      develop:feature/*|develop:docs/*|develop:chore/*|develop:main) ok "rama de origen válida para $base" ;;
-      main:release/*|main:hotfix/*)                                  ok "rama de origen válida para $base" ;;
-      *) falla "no se acepta un PR de '$origen' a '$base' (ver docs/METODOLOGIA.md §8)" ;;
-    esac
-    if [[ "$FASE" == LIBRE ]]; then ok "fase LIBRE"
-    else falla "la feature $FEATURE está en $FASE: solo se abren PR con la feature cerrada"; fi
-    if [[ "$origen" =~ ^(feature|hotfix)/(F-[0-9]{3})- ]]; then
-      id="${BASH_REMATCH[2]}"
-      if git rev-parse -q --verify "refs/tags/$id/cerrada" >/dev/null \
-         && git merge-base --is-ancestor "$id/cerrada" HEAD; then ok "tag $id/cerrada presente"
-      else falla "falta el tag $id/cerrada (¿pasó el gate 3? ¿se subió con git push --follow-tags?)"; fi
-    fi
+  if [[ -z "$base" ]]; then echo "Sin PR: no hay reglas de ramas que verificar."; return; fi
+  echo "PR: $origen → $base"
+  case "$base:$origen" in
+    develop:feature/*|develop:docs/*|develop:chore/*|develop:main) ok "rama de origen válida para $base" ;;
+    main:release/*|main:hotfix/*)                                  ok "rama de origen válida para $base" ;;
+    *) falla "no se acepta un PR de '$origen' a '$base' (ver docs/METODOLOGIA.md §9)" ;;
+  esac
+  if [[ "$FASE" == LIBRE ]]; then ok "fase LIBRE"
+  else falla "la feature $FEATURE está en $FASE: solo se abren PR con la feature cerrada"; fi
+  if [[ "$origen" =~ ^(feature|hotfix)/(F-[0-9]{3})- ]]; then
+    id="${BASH_REMATCH[2]}"
+    if git rev-parse -q --verify "refs/tags/$id/cerrada" >/dev/null \
+       && git merge-base --is-ancestor "$id/cerrada" HEAD; then ok "tag $id/cerrada presente"
+    else falla "falta el tag $id/cerrada (¿pasó el gate 3? ¿se subió con git push --follow-tags?)"; fi
   fi
-  correr tests "$TEST_CMD" pasa
-  correr lint "$LINT_CMD" pasa
-  correr tipado "$TYPECHECK_CMD" pasa
   echo
-  if (( FALLAS == 0 )); then echo "CI OK."; else echo "$FALLAS chequeo(s) fallaron."; exit 1; fi
+  if (( FALLAS == 0 )); then echo "Reglas OK."; else echo "$FALLAS chequeo(s) fallaron."; exit 1; fi
+}
+
+cmd_ci_componente() {
+  local c="${1:-}"
+  existe_componente "$c" || morir "componente desconocido: '$c'"
+  echo "Componente $c"
+  correr "$c" tests "${C_TEST[$c]}" pasa
+  correr "$c" lint "${C_LINT[$c]}" pasa
+  correr "$c" tipado "${C_TIPADO[$c]}" pasa
+  (( FALLAS == 0 )) || exit 1
 }
 
 case "${1:-}" in
-  ci)         shift; cmd_ci "$@" ;;
-  estado)     cmd_estado ;;
-  verificar)  cmd_verificar ;;
-  cobertura)  cmd_cobertura ;;
-  iniciar)    shift; cmd_iniciar "$@" ;;
-  avanzar)    cmd_avanzar ;;
-  retroceder) shift; cmd_retroceder "$@" ;;
-  *)          sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
+  estado)        cmd_estado ;;
+  verificar)     cmd_verificar ;;
+  cobertura)     cmd_cobertura ;;
+  iniciar)       shift; cmd_iniciar "$@" ;;
+  avanzar)       cmd_avanzar ;;
+  retroceder)    shift; cmd_retroceder "$@" ;;
+  componentes)   cmd_componentes ;;
+  componente)    shift; cmd_componente "$@" ;;
+  pendientes)    cmd_pendientes ;;
+  publicar)      shift; cmd_publicar "$@" ;;
+  ci)            shift; cmd_ci "$@" ;;
+  ci-componente) shift; cmd_ci_componente "$@" ;;
+  *)             sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac

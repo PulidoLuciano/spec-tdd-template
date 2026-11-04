@@ -1,6 +1,7 @@
 # F-NNN — <Nombre>
 
 **Casos de uso:** UC-NNN
+**Componentes:** <nombre>, <nombre>
 
 ## Objetivo
 <qué valor entrega esta feature>

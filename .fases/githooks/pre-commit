@@ -8,7 +8,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 rama="$(rama_actual)"
 for protegida in $RAMAS_PROTEGIDAS; do
   if [[ "$rama" == "$protegida" ]] && git rev-parse -q --verify HEAD >/dev/null; then
-    echo "Commit rechazado: no se commitea directo en $rama. Creá una rama y abrí un PR (ver docs/METODOLOGIA.md §8)." >&2
+    echo "Commit rechazado: no se commitea directo en $rama. Creá una rama y abrí un PR (ver docs/METODOLOGIA.md §9)." >&2
     exit 1
   fi
 done
@@ -19,6 +19,7 @@ git rev-parse -q --verify HEAD >/dev/null || exit 0
 cargar_config
 leer_estado "$(git show HEAD:.fases/estado 2>/dev/null)"
 [[ -n "$FASE" ]] || exit 0
+declarados="$(componentes_declarados)"
 
 # Tag del último gate: restaurar un archivo congelado a esa versión siempre está permitido.
 case "$FASE" in
@@ -30,14 +31,16 @@ esac
 rechazados=""
 while IFS= read -r rel; do
   [[ -n "$rel" ]] || continue
-  if [[ "$rel" == .fases/estado ]] || ! permitido "$FASE" "$(grupo_de_ruta "$rel")" git; then
-    [[ -n "$tag_gate" && "$rel" != .fases/estado ]] && git diff --cached --quiet "$tag_gate" -- "$rel" 2>/dev/null && continue
-    rechazados+="  $rel"$'\n'
+  if [[ "$rel" == .fases/estado ]]; then
+    rechazados+="  .fases/estado solo lo modifica .fases/fase"$'\n'
+  elif ! ruta_permitida "$rel" "$FASE" git "$declarados"; then
+    [[ -n "$tag_gate" ]] && git diff --cached --quiet "$tag_gate" -- "$rel" 2>/dev/null && continue
+    rechazados+="  $MOTIVO"$'\n'
   fi
 done < <(git diff --cached --name-only --no-renames)
 
 if [[ -n "$rechazados" ]]; then
-  echo "Commit rechazado: estos archivos están congelados en la fase $FASE (feature $FEATURE):" >&2
+  echo "Commit rechazado (fase $FASE, feature $FEATURE):" >&2
   printf '%s' "$rechazados" >&2
   echo "Para cambiar de fase usá .fases/fase (ver docs/METODOLOGIA.md)." >&2
   exit 1

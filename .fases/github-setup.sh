@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Configura el repo en GitHub según docs/METODOLOGIA.md §8. Lo corre el usuario, una vez.
+# Configura el repo en GitHub según docs/METODOLOGIA.md §9. Lo corre el usuario, una vez.
 #   - Sube main y develop. develop queda como rama por defecto (los PR apuntan ahí).
 #   - Solo merge commits (sin squash ni rebase) y borrado de ramas al mergear.
 #   - Protege main y develop: PR obligatorio, check "fases" en verde, sin force push. Vale también para admins.
