@@ -1,0 +1,28 @@
+# Chequeos de la metodología en cada PR y en cada push a develop/main.
+# El job se llama "fases": es el status check que exige la protección de ramas.
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+jobs:
+  fases:
+    name: fases
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # historial y tags completos: se verifican los tags de cada gate
+          fetch-tags: true
+
+      # ── Preparar el stack (completar según ADR-0001) ──────────────────────
+      # - uses: actions/setup-python@v5
+      #   with:
+      #     python-version: "3.12"
+      # - run: pip install -r requirements.txt
+
+      - name: Chequeos de fases
+        run: .fases/fase ci

@@ -4,9 +4,11 @@
 #   .fases/fase estado                     Feature y fase activas, qué se puede tocar
 #   .fases/fase verificar                  Corre los chequeos del gate actual sin avanzar
 #   .fases/fase cobertura                  Casos documentados de la feature sin test
-#   .fases/fase iniciar F-NNN <nombre>     LIBRE → SPEC
+#   .fases/fase iniciar F-NNN <nombre>     LIBRE → SPEC: crea feature/F-NNN-<nombre> desde develop
+#                                          (o hotfix/F-NNN-<nombre> desde main)
 #   .fases/fase avanzar                    Pasa el gate actual (SPEC → TESTS → IMPL → LIBRE)
 #   .fases/fase retroceder SPEC|TESTS      Vuelve a una fase anterior por un error encontrado
+#   .fases/fase ci [base] [origen]         Chequeos de un PR (lo corre GitHub Actions)
 #
 # Las transiciones piden confirmación por terminal interactiva: solo las puede ejecutar el usuario.
 
@@ -200,6 +202,7 @@ commitear_transicion() {
 }
 
 cmd_estado() {
+  echo "Rama:    $(rama_actual)"
   echo "Feature: $FEATURE"
   echo "Fase:    $FASE"
   case "$FASE" in
@@ -227,19 +230,33 @@ cmd_cobertura() {
 }
 
 cmd_iniciar() {
-  local id="${1:-}" nombre="${2:-}" archivo
+  local id="${1:-}" nombre="${2:-}" archivo base tipo rama
   [[ "$FASE" == LIBRE ]] || morir "ya hay una feature activa ($FEATURE en $FASE)."
   [[ "$id" =~ ^F-[0-9]{3}$ && "$nombre" =~ ^[a-z0-9-]+$ ]] || morir "uso: .fases/fase iniciar F-NNN nombre-en-kebab-case"
-  FEATURE="$id"
-  [[ -z "$(archivo_feature)" ]] && ! git rev-parse -q --verify "refs/tags/$id/cerrada" >/dev/null \
-    || morir "la feature $id ya existe."
   requiere_arbol_limpio
-  confirmar "¿Iniciar $id ($nombre) en fase SPEC?"
+  base="$(rama_actual)"
+  case "$base" in
+    develop) tipo=feature ;;
+    main)    tipo=hotfix ;;
+    *)       morir "iniciá las features desde develop (o los hotfixes desde main). Rama actual: ${base:-HEAD suelto}." ;;
+  esac
+  if git remote get-url origin >/dev/null 2>&1; then
+    git fetch -q --prune --tags origin || morir "no se pudo actualizar desde origin."
+    [[ "$(git rev-parse HEAD)" == "$(git rev-parse "origin/$base")" ]] \
+      || morir "$base no está al día con origin/$base (git pull)."
+  fi
+  FEATURE="$id"
+  if [[ -n "$(archivo_feature)" || -n "$(git tag -l "$id/*")" || -n "$(git branch -a --list "*/$id-*")" ]]; then
+    morir "el ID $id ya está en uso (archivo, tag o rama)."
+  fi
+  rama="$tipo/$id-$nombre"
+  confirmar "¿Crear la rama $rama desde $base e iniciar $id en fase SPEC?"
+  git switch -q -c "$rama" || morir "no se pudo crear la rama $rama."
   archivo="$DIR_DOCS/features/$id-$nombre.md"
   sed "1s/.*/# $id — $nombre/" "$DIR_DOCS/plantillas/feature.md" > "$archivo"
   escribir_estado "$id" SPEC
   commitear_transicion "fase: $id iniciada (LIBRE → SPEC)" "$archivo"
-  echo "Feature $id en SPEC. Archivo: $archivo"
+  echo "Rama $rama creada. $id en SPEC. Archivo: $archivo"
 }
 
 cmd_avanzar() {
@@ -259,7 +276,7 @@ cmd_avanzar() {
     bash -c "$FIRMAS_CMD" > ".fases/firmas/$FEATURE.txt" || morir "falló FIRMAS_CMD."
     extra+=(".fases/firmas/$FEATURE.txt")
   fi
-  git tag -f "$FEATURE/$tag" HEAD >/dev/null
+  git tag -a -f -m "$FEATURE: $tag" "$FEATURE/$tag" HEAD >/dev/null
   if [[ "$siguiente" == LIBRE ]]; then escribir_estado - LIBRE; else escribir_estado "$FEATURE" "$siguiente"; fi
   commitear_transicion "fase: $FEATURE $FASE → $siguiente" "${extra[@]}"
   echo "Tag $FEATURE/$tag creado. $FEATURE: $FASE → $siguiente."
@@ -274,7 +291,7 @@ cmd_retroceder() {
   requiere_arbol_limpio
   confirmar "¿Retroceder $FEATURE de $FASE a $destino?"
   n=$(( $(git tag -l "$FEATURE/retroceso-*" | wc -l) + 1 ))
-  git tag "$FEATURE/retroceso-$n" HEAD
+  git tag -a -m "$FEATURE: retroceso $n ($FASE → $destino)${motivo:+. $motivo}" "$FEATURE/retroceso-$n" HEAD
   escribir_estado "$FEATURE" "$destino"
   commitear_transicion "fase: $FEATURE $FASE → $destino (retroceso $n)${motivo:+
 
@@ -283,12 +300,40 @@ $motivo}"
   [[ "$destino" == SPEC ]] && echo "Registrá la incidencia en el archivo de la feature."
 }
 
+# ── CI ───────────────────────────────────────────────────────────────────────
+
+cmd_ci() {
+  local base="${1:-${GITHUB_BASE_REF:-}}" origen="${2:-${GITHUB_HEAD_REF:-}}" id
+  if [[ -n "$base" ]]; then
+    echo "PR: $origen → $base"
+    case "$base:$origen" in
+      develop:feature/*|develop:docs/*|develop:chore/*|develop:main) ok "rama de origen válida para $base" ;;
+      main:release/*|main:hotfix/*)                                  ok "rama de origen válida para $base" ;;
+      *) falla "no se acepta un PR de '$origen' a '$base' (ver docs/METODOLOGIA.md §8)" ;;
+    esac
+    if [[ "$FASE" == LIBRE ]]; then ok "fase LIBRE"
+    else falla "la feature $FEATURE está en $FASE: solo se abren PR con la feature cerrada"; fi
+    if [[ "$origen" =~ ^(feature|hotfix)/(F-[0-9]{3})- ]]; then
+      id="${BASH_REMATCH[2]}"
+      if git rev-parse -q --verify "refs/tags/$id/cerrada" >/dev/null \
+         && git merge-base --is-ancestor "$id/cerrada" HEAD; then ok "tag $id/cerrada presente"
+      else falla "falta el tag $id/cerrada (¿pasó el gate 3? ¿se subió con git push --follow-tags?)"; fi
+    fi
+  fi
+  correr tests "$TEST_CMD" pasa
+  correr lint "$LINT_CMD" pasa
+  correr tipado "$TYPECHECK_CMD" pasa
+  echo
+  if (( FALLAS == 0 )); then echo "CI OK."; else echo "$FALLAS chequeo(s) fallaron."; exit 1; fi
+}
+
 case "${1:-}" in
+  ci)         shift; cmd_ci "$@" ;;
   estado)     cmd_estado ;;
   verificar)  cmd_verificar ;;
   cobertura)  cmd_cobertura ;;
   iniciar)    shift; cmd_iniciar "$@" ;;
   avanzar)    cmd_avanzar ;;
   retroceder) shift; cmd_retroceder "$@" ;;
-  *)          sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *)          sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
 esac
