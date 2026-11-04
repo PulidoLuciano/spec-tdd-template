@@ -1,17 +1,5 @@
-# Configuración propia del proyecto. Se completa al decidir el stack (ADR-0001).
-# Solo se puede modificar en fase LIBRE.
+# Configuración global del proyecto. Solo se puede modificar en fase LIBRE.
+# Lo propio de cada componente (rutas y comandos) va en .fases/componentes/<nombre>.conf.
 
-# Comandos del stack. Deben salir con código 0 si todo está bien.
-TEST_CMD=""        # obligatorio, ej: "pytest"  /  "npm test"  /  "go test ./..."
-LINT_CMD=""        # ej: "ruff check ."  /  "npx eslint ."
-TYPECHECK_CMD=""   # ej: "mypy src"  /  "npx tsc --noEmit"
-
-# Opcional: comando que imprime las firmas públicas de la API.
-# Se guarda en el gate 1 y se compara en el gate 3 para garantizar que no cambiaron.
-FIRMAS_CMD=""
-
-# Prefijos de ruta de cada grupo, separados por espacio.
-# Incluí en RUTAS_TESTS los archivos de configuración de tests (ej: "tests/ jest.config.js").
+# Prefijos de ruta de la documentación del producto, separados por espacio.
 RUTAS_DOCS="docs/"
-RUTAS_SRC="src/"
-RUTAS_TESTS="tests/"

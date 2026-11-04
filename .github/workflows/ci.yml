@@ -1,5 +1,7 @@
-# Chequeos de la metodología en cada PR y en cada push a develop/main.
-# El job se llama "fases": es el status check que exige la protección de ramas.
+# CI de la metodología. Corre en cada PR a develop/main y en cada push a esas ramas.
+#   reglas         ramas válidas, feature cerrada, tags de gates (.fases/fase ci)
+#   comp-<nombre>  tests, lint y tipado de cada componente (los agrega .fases/fase componente agregar)
+#   fases          resultado final: es el status check que exige la protección de ramas
 name: CI
 
 on:
@@ -9,20 +11,27 @@ on:
     branches: [develop, main]
 
 jobs:
-  fases:
-    name: fases
+  reglas:
+    name: reglas
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0     # historial y tags completos: se verifican los tags de cada gate
           fetch-tags: true
-
-      # ── Preparar el stack (completar según ADR-0001) ──────────────────────
-      # - uses: actions/setup-python@v5
-      #   with:
-      #     python-version: "3.12"
-      # - run: pip install -r requirements.txt
-
-      - name: Chequeos de fases
+      - name: Reglas de fases y ramas
         run: .fases/fase ci
+
+  # >>> componentes (gestionado por .fases/fase componente agregar)
+  # <<< componentes
+
+  fases:
+    name: fases
+    if: always()
+    needs: [reglas] # componentes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resultado
+        run: |
+          echo '${{ toJSON(needs) }}'
+          [[ "${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}" == false ]]

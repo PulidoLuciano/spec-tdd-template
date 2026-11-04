@@ -1,0 +1,13 @@
+  comp-__NOMBRE__:
+    name: __NOMBRE__
+    runs-on: ubuntu-latest   # para builds de iOS/macOS: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # ── Preparar el stack de __NOMBRE__ (completar según ADR-0001) ──────────
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 22
+      # - run: npm ci
+      #   working-directory: <ruta del componente>
+      - name: Tests, lint y tipado
+        run: .fases/fase ci-componente __NOMBRE__

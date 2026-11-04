@@ -1,0 +1,40 @@
+# Deploy del componente __NOMBRE__ (ver docs/METODOLOGIA.md §9):
+#   push a develop que toca __GLOB__  → staging
+#   tag __NOMBRE__/v* en main        → production   (.fases/fase publicar __NOMBRE__ vX.Y.Z)
+#   Run workflow (manual)            → preview, desde la rama que elijas
+# Según el tipo de componente, "deploy" puede ser subir a un servidor, publicar un sitio,
+# subir un build a TestFlight / Play o publicar instaladores.
+# Los secretos de cada entorno van en Settings → Environments.
+name: Deploy __NOMBRE__
+
+on:
+  push:
+    branches: [develop]
+    paths: ["__GLOB__"]
+    tags: ["__NOMBRE__/v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-__NOMBRE__-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && 'preview' || startsWith(github.ref, 'refs/tags/') && 'production' || 'staging' }}
+    env:
+      ENTORNO: ${{ github.event_name == 'workflow_dispatch' && 'preview' || startsWith(github.ref, 'refs/tags/') && 'production' || 'staging' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verificar que el tag esté en main
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main \
+            || { echo "El tag ${GITHUB_REF_NAME} no apunta a un commit de main."; exit 1; }
+
+      # ── Preparar el stack y desplegar (completar según el ADR de infraestructura) ──
+      - name: Deploy a ${{ env.ENTORNO }}
+        run: echo "::warning::El deploy de __NOMBRE__ a $ENTORNO todavía no está configurado."

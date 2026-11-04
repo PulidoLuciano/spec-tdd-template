@@ -18,13 +18,10 @@ rel="${ruta#"$FASES_RAIZ"/}"
 
 cargar_config
 leer_estado
-grupo="$(grupo_de_ruta "$rel")"
 
-if ! permitido "$FASE" "$grupo" claude; then
-  if [[ "$grupo" == maquinaria ]]; then
-    echo "Bloqueado: $rel es parte de la maquinaria de fases y Claude no puede modificarla." >&2
-  else
-    echo "Bloqueado: $rel pertenece a '$grupo', que está congelado en la fase $FASE (feature $FEATURE)." >&2
+if ! ruta_permitida "$rel" "$FASE" claude "$(componentes_declarados)"; then
+  echo "Bloqueado: $MOTIVO" >&2
+  if [[ "$GRUPO" != maquinaria && "$GRUPO" != config ]]; then
     echo "Si encontraste un error en una fase congelada, detenete y reportáselo al usuario; no lo corrijas en el lugar." >&2
   fi
   exit 2

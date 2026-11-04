@@ -7,7 +7,7 @@ Plantilla para proyectos que siguen una metodología **spec → tests → implem
 - El código se escribe solo para hacer pasar los tests.
 - Mientras se escriben los tests no se puede tocar la documentación; mientras se implementa no se puede tocar ni la documentación ni los tests.
 
-Es independiente del lenguaje: lo propio de cada stack se configura en `.fases/config`.
+Es independiente del lenguaje y sirve tanto para un proyecto simple como para un monorepo con varios componentes (backend, web, desktop, mobile…), cada uno con su stack. La plantilla no trae componentes: cada proyecto crea los que tiene con `.fases/fase componente agregar`.
 
 ## Uso
 
@@ -25,21 +25,23 @@ Requiere `git`, `jq` y `gh`. `setup.sh` activa el hook de git y crea `develop`; 
 | Fase | Se puede tocar | Se sale con |
 |---|---|---|
 | LIBRE | `docs/`, config, tooling | `.fases/fase iniciar F-001 nombre` |
-| SPEC | `docs/`, stubs en `src/` | `.fases/fase avanzar` (gate 1) |
-| TESTS | `tests/` | `.fases/fase avanzar` (gate 2) |
-| IMPL | `src/` | `.fases/fase avanzar` (gate 3: todo en verde) |
+| SPEC | `docs/`, stubs en `src` | `.fases/fase avanzar` (gate 1) |
+| TESTS | `tests` | `.fases/fase avanzar` (gate 2) |
+| IMPL | `src` | `.fases/fase avanzar` (gate 3: todo en verde) |
+
+Cada feature declara qué componentes toca; los demás quedan congelados.
 
 ## Ramas y entornos
 
 | Rama | Contiene | Deploy |
 |---|---|---|
-| `main` | Producción | `production`, al crear un tag `v*` |
-| `develop` | Features cerradas, sin release todavía | `staging`, en cada merge |
+| `main` | Producción | `production`, al publicar `<componente>/vX.Y.Z` |
+| `develop` | Features cerradas, sin publicar todavía | `staging`, en cada merge (los componentes que cambiaron) |
 | `feature/F-NNN-*` | Una feature en curso | `preview`, a mano |
-| `release/vX.Y.Z` | Lo que va en el próximo release | — |
+| `release/<nombre>` | Lo que va en la próxima salida a producción | — |
 | `hotfix/F-NNN-*` | Un bug urgente de producción | `preview`, a mano |
 
-Todo entra por PR y con merge commit. El deploy lo implementa cada proyecto en `scripts/deploy.sh`.
+Todo entra por PR y con merge commit. Cada componente tiene su propia versión y su propio workflow de deploy, que completa cada proyecto.
 
 ## Enforcement
 
